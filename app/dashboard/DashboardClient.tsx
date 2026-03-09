@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 
 interface Email {
   id: string;
@@ -87,11 +87,35 @@ const SUGGESTED_PROMPTS = [
   "Who emailed me most recently?",
 ];
 
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024; // 25 MB Gmail limit
+
+interface Attachment {
+  name: string;
+  size: number;
+  mimeType: string;
+  base64: string;
+}
+
 interface SendModal {
   to: string;
   senderName: string;
   subject: string;
   body: string;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve((reader.result as string).split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }
 
 export default function DashboardClient({ emails, emailContext, displayName }: Props) {
@@ -103,10 +127,12 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
   const [isLoading, setIsLoading] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [sendModal, setSendModal] = useState<SendModal | null>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -208,6 +234,7 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
 
   function openSendModal(msg: Message) {
     if (!selectedEmail) return;
+    setAttachments([]);
     setSendModal({
       to: parseEmail(selectedEmail.from),
       senderName: parseSender(selectedEmail.from),
@@ -217,6 +244,33 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
       body: extractDraftBody(msg.content),
     });
   }
+
+  function closeModal() {
+    setSendModal(null);
+    setAttachments([]);
+  }
+
+  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // reset so same file can be re-added after removal
+    for (const file of files) {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setToast(`File too large — Gmail limit is 25MB`);
+        setTimeout(() => setToast(null), 4000);
+        continue;
+      }
+      try {
+        const base64 = await readFileAsBase64(file);
+        setAttachments((prev) => [
+          ...prev,
+          { name: file.name, size: file.size, mimeType: file.type || "application/octet-stream", base64 },
+        ]);
+      } catch {
+        setToast("Failed to read file");
+        setTimeout(() => setToast(null), 3500);
+      }
+    }
+  }, []);
 
   async function confirmSend() {
     if (!sendModal) return;
@@ -229,13 +283,14 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
           to: sendModal.to,
           subject: sendModal.subject,
           body: sendModal.body,
+          attachments: attachments.map(({ name, mimeType, base64 }) => ({ name, mimeType, base64 })),
         }),
       });
       if (!res.ok) {
         const { error } = await res.json();
         throw new Error(error || "Send failed");
       }
-      setSendModal(null);
+      closeModal();
       setToast(`Reply sent to ${sendModal.senderName} ✓`);
       setTimeout(() => setToast(null), 3500);
     } catch (err: unknown) {
@@ -489,13 +544,22 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
         </div>
       </div>
 
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={handleFileSelect}
+      />
+
       {/* Send confirmation modal */}
       {sendModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           {/* Backdrop */}
           <div
             className="absolute inset-0 bg-black/30 backdrop-blur-sm"
-            onClick={() => !isSending && setSendModal(null)}
+            onClick={() => !isSending && closeModal()}
           />
           {/* Modal */}
           <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-md p-6 flex flex-col gap-4">
@@ -507,41 +571,84 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
               </p>
               <p className="text-xs text-zinc-400 mt-0.5">Subject: {sendModal.subject}</p>
             </div>
+
             {/* Draft preview */}
-            <div className="rounded-xl bg-zinc-50 border border-zinc-200 px-4 py-3 max-h-48 overflow-y-auto">
+            <div className="rounded-xl bg-zinc-50 border border-zinc-200 px-4 py-3 max-h-40 overflow-y-auto">
               <p className="text-xs text-zinc-700 whitespace-pre-wrap leading-relaxed">{sendModal.body}</p>
             </div>
-            <div className="flex gap-2 justify-end">
-              <button
-                onClick={() => setSendModal(null)}
-                disabled={isSending}
-                className="rounded-xl border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={confirmSend}
-                disabled={isSending}
-                className="flex items-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
-              >
-                {isSending ? (
-                  <>
-                    <svg className="animate-spin w-3.5 h-3.5" viewBox="0 0 24 24" fill="none">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+
+            {/* Attachment chips */}
+            {attachments.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {attachments.map((att, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-xs text-zinc-700"
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
                     </svg>
-                    Sending...
-                  </>
-                ) : (
-                  <>
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="22" y1="2" x2="11" y2="13" />
-                      <polygon points="22 2 15 22 11 13 2 9 22 2" />
-                    </svg>
-                    Send
-                  </>
-                )}
+                    <span className="max-w-[140px] truncate font-medium">{att.name}</span>
+                    <span className="text-zinc-400">{formatSize(att.size)}</span>
+                    <button
+                      onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
+                      className="ml-0.5 text-zinc-400 hover:text-zinc-700 transition-colors"
+                      aria-label="Remove attachment"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex items-center justify-between">
+              {/* Paperclip */}
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isSending}
+                title="Attach a file"
+                className="flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-500 hover:border-zinc-300 hover:text-zinc-700 disabled:opacity-50 transition-colors"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                </svg>
+                Attach
               </button>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={closeModal}
+                  disabled={isSending}
+                  className="rounded-xl border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmSend}
+                  disabled={isSending}
+                  className="flex items-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
+                >
+                  {isSending ? (
+                    <>
+                      <svg className="animate-spin w-3.5 h-3.5" viewBox="0 0 24 24" fill="none">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                      </svg>
+                      Sending...
+                    </>
+                  ) : (
+                    <>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="22" y1="2" x2="11" y2="13" />
+                        <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                      </svg>
+                      Send
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>

@@ -3,11 +3,66 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { google } from "googleapis";
 
+interface Attachment {
+  name: string;
+  mimeType: string;
+  base64: string;
+}
+
+function buildMessage(
+  to: string,
+  subject: string,
+  body: string,
+  attachments: Attachment[]
+): string {
+  if (attachments.length === 0) {
+    return [
+      `To: ${to}`,
+      `Subject: ${subject}`,
+      "MIME-Version: 1.0",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      body,
+    ].join("\r\n");
+  }
+
+  const boundary = `----=_Part_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+  const lines: string[] = [
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    "",
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=utf-8",
+    "Content-Transfer-Encoding: 7bit",
+    "",
+    body,
+  ];
+
+  for (const att of attachments) {
+    // Fold base64 into 76-char lines as required by RFC 2045
+    const folded = att.base64.replace(/(.{76})/g, "$1\r\n").trimEnd();
+    lines.push(
+      `--${boundary}`,
+      `Content-Type: ${att.mimeType}; name="${att.name}"`,
+      `Content-Disposition: attachment; filename="${att.name}"`,
+      "Content-Transfer-Encoding: base64",
+      "",
+      folded
+    );
+  }
+
+  lines.push(`--${boundary}--`);
+  return lines.join("\r\n");
+}
+
 export async function POST(request: NextRequest) {
   const { userId } = await auth();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { to, subject, body } = await request.json();
+  const { to, subject, body, attachments = [] } = await request.json();
   if (!to || !subject || !body) {
     return NextResponse.json({ error: "Missing to, subject, or body" }, { status: 400 });
   }
@@ -30,18 +85,8 @@ export async function POST(request: NextRequest) {
   });
 
   const gmail = google.gmail({ version: "v1", auth: oauth2Client });
-
-  // Build RFC 2822 message
-  const message = [
-    `To: ${to}`,
-    `Subject: ${subject}`,
-    "Content-Type: text/plain; charset=utf-8",
-    "MIME-Version: 1.0",
-    "",
-    body,
-  ].join("\r\n");
-
-  const encoded = Buffer.from(message).toString("base64url");
+  const raw = buildMessage(to, subject, body, attachments as Attachment[]);
+  const encoded = Buffer.from(raw).toString("base64url");
 
   await gmail.users.messages.send({
     userId: "me",

@@ -148,6 +148,10 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
   const [isLoading, setIsLoading] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [speakingIdx, setSpeakingIdx] = useState<number | null>(null);
+  const [isReadingEmail, setIsReadingEmail] = useState(false);
+  const [emailSentences, setEmailSentences] = useState<string[]>([]);
+  const [highlightedSentenceIdx, setHighlightedSentenceIdx] = useState<number | null>(null);
+  const emailReadingRef = useRef<{ active: boolean }>({ active: false });
   const [sendModal, setSendModal] = useState<SendModal | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentsMsgIdx, setAttachmentsMsgIdx] = useState<number | null>(null);
@@ -227,6 +231,7 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
   const selectedEmail = selectedEmailId ? emails.find((e) => e.id === selectedEmailId) : null;
 
   async function selectEmail(id: string | null) {
+    stopEmailReading();
     setSelectedEmailId(id);
     setSelectedEmailBody(null);
     if (!id) return;
@@ -347,7 +352,51 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
     } finally { setIsSending(false); }
   }
 
+  function stopEmailReading() {
+    emailReadingRef.current.active = false;
+    window.speechSynthesis.cancel();
+    setIsReadingEmail(false);
+    setHighlightedSentenceIdx(null);
+    setEmailSentences([]);
+  }
+
+  function speakEmailSentence(sentences: string[], idx: number) {
+    if (idx >= sentences.length || !emailReadingRef.current.active) {
+      setIsReadingEmail(false);
+      setHighlightedSentenceIdx(null);
+      return;
+    }
+    setHighlightedSentenceIdx(idx);
+    const utter = new SpeechSynthesisUtterance(sentences[idx]);
+    utter.onend = () => {
+      if (!emailReadingRef.current.active) return;
+      speakEmailSentence(sentences, idx + 1);
+    };
+    utter.onerror = () => { setIsReadingEmail(false); setHighlightedSentenceIdx(null); };
+    window.speechSynthesis.speak(utter);
+  }
+
+  function speakEmail() {
+    if (isReadingEmail) { stopEmailReading(); return; }
+    if (!selectedEmailBody) return;
+    // Stop any chat TTS in progress
+    setSpeakingIdx(null);
+    window.speechSynthesis.cancel();
+    // Split into sentences on . ! ? followed by space/newline
+    const sentences = selectedEmailBody
+      .replace(/([.!?])\s+/g, "$1\n")
+      .split("\n")
+      .map(s => s.trim())
+      .filter(s => s.length > 1);
+    if (sentences.length === 0) return;
+    setEmailSentences(sentences);
+    setIsReadingEmail(true);
+    emailReadingRef.current = { active: true };
+    speakEmailSentence(sentences, 0);
+  }
+
   function speak(text: string, idx: number) {
+    stopEmailReading(); // stop email reading if in progress
     window.speechSynthesis.cancel();
     if (speakingIdx === idx) { setSpeakingIdx(null); return; }
     // Strip markdown syntax before speaking
@@ -508,6 +557,24 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
                   </svg>
                   Draft Reply
                 </button>
+                {/* Read Aloud */}
+                <button
+                  onClick={speakEmail}
+                  disabled={isBodyLoading || !selectedEmailBody}
+                  title={isReadingEmail ? "Stop reading" : "Read aloud"}
+                  className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${isReadingEmail ? "border-violet-300 bg-violet-50 text-violet-700 hover:bg-violet-100" : "border-zinc-200 bg-white text-zinc-500 hover:border-zinc-300 hover:text-zinc-700"}`}
+                >
+                  {isReadingEmail ? (
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2" /></svg>
+                  ) : (
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                      <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                      <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                    </svg>
+                  )}
+                  {isReadingEmail ? "Stop" : "Read Aloud"}
+                </button>
                 <button onClick={() => selectEmail(null)} className="w-6 h-6 flex items-center justify-center rounded-md text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors text-sm">✕</button>
               </div>
             </div>
@@ -521,7 +588,18 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
                   Loading email...
                 </div>
               ) : selectedEmailBody ? (
-                <p className="text-xs text-zinc-600 whitespace-pre-wrap leading-relaxed">{selectedEmailBody}</p>
+                <p className="text-xs text-zinc-600 whitespace-pre-wrap leading-relaxed">
+                  {emailSentences.length > 0 ? (
+                    emailSentences.map((sentence, si) => (
+                      <span
+                        key={si}
+                        className={`transition-colors duration-150 ${si === highlightedSentenceIdx ? "bg-yellow-100 rounded px-0.5" : ""}`}
+                      >
+                        {sentence}{si < emailSentences.length - 1 ? " " : ""}
+                      </span>
+                    ))
+                  ) : selectedEmailBody}
+                </p>
               ) : (
                 <p className="text-xs text-zinc-400 italic">Could not load email body.</p>
               )}

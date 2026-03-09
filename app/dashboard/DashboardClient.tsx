@@ -147,6 +147,7 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
   const [isBodyLoading, setIsBodyLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  const [speakingIdx, setSpeakingIdx] = useState<number | null>(null);
   const [sendModal, setSendModal] = useState<SendModal | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentsMsgIdx, setAttachmentsMsgIdx] = useState<number | null>(null);
@@ -344,6 +345,24 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
     } catch (err: unknown) {
       showToast(`Failed to send: ${err instanceof Error ? err.message : "Unknown error"}`, 4000);
     } finally { setIsSending(false); }
+  }
+
+  function speak(text: string, idx: number) {
+    window.speechSynthesis.cancel();
+    if (speakingIdx === idx) { setSpeakingIdx(null); return; }
+    // Strip markdown syntax before speaking
+    const plain = text
+      .replace(/\*\*(.+?)\*\*/g, "$1")
+      .replace(/\*(.+?)\*/g, "$1")
+      .replace(/^#{1,3}\s+/gm, "")
+      .replace(/^- /gm, "")
+      .replace(/\n+/g, " ")
+      .trim();
+    const utter = new SpeechSynthesisUtterance(plain);
+    utter.onend = () => setSpeakingIdx(null);
+    utter.onerror = () => setSpeakingIdx(null);
+    setSpeakingIdx(idx);
+    window.speechSynthesis.speak(utter);
   }
 
   async function copyToClipboard(text: string, idx: number) {
@@ -553,7 +572,24 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
                         <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce" style={{ animationDelay: "300ms" }} />
                       </div>
                     ) : (
-                      <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
+                      <div className="flex items-start justify-between gap-3">
+                        <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
+                        <button
+                          onClick={() => speak(msg.content, i)}
+                          title={speakingIdx === i ? "Stop" : "Read aloud"}
+                          className="flex-shrink-0 mt-0.5 text-zinc-400 hover:text-zinc-600 transition-colors"
+                        >
+                          {speakingIdx === i ? (
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2" /></svg>
+                          ) : (
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                              <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                              <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                            </svg>
+                          )}
+                        </button>
+                      </div>
                     )
                   ) : msg.content}
                 </div>

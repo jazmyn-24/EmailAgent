@@ -57,6 +57,29 @@ function renderMarkdown(text: string) {
     .replace(/\n/g, "<br/>");
 }
 
+// Strips commentary and extracts just the reply body.
+// Handles --- delimiters, "Here's a draft:" preambles, and trailing sign-off lines.
+function extractDraftBody(text: string): string {
+  // If --- markers exist, take the content between the first pair
+  const fenced = text.match(/---+\s*\n([\s\S]*?)\n\s*---+/);
+  if (fenced) return fenced[1].trim();
+
+  // Strip common preamble lines (anything ending with : on the first line)
+  const lines = text.split("\n");
+  let start = 0;
+  if (lines[0] && /^.{0,80}:\s*$/.test(lines[0].trim())) start = 1;
+  // Skip any blank lines after preamble
+  while (start < lines.length && lines[start].trim() === "") start++;
+
+  // Strip trailing commentary lines like "Feel free to..." / "Let me know..."
+  let end = lines.length;
+  while (end > start && /^(feel free|let me know|hope this|please let|don't hesitate|best regards note|note:|p\.s\.)/i.test(lines[end - 1].trim())) {
+    end--;
+  }
+
+  return lines.slice(start, end).join("\n").trim();
+}
+
 const SUGGESTED_PROMPTS = [
   "Summarize my inbox",
   "Any action items today?",
@@ -191,7 +214,7 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
       subject: selectedEmail.subject.startsWith("Re:")
         ? selectedEmail.subject
         : `Re: ${selectedEmail.subject}`,
-      body: msg.content,
+      body: extractDraftBody(msg.content),
     });
   }
 

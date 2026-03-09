@@ -82,7 +82,9 @@ ${focusedBlock}
 Use search_gmail when user asks about specific people, topics, or dates not in the snapshot.
 Gmail syntax: from:x, subject:x, after:YYYY/MM/DD, is:unread, has:attachment
 
-Be concise. Use markdown when helpful.`;
+Be concise. Use markdown when helpful.
+
+When asked to draft a reply, output ONLY the email body text — no commentary before or after, no "Here's a draft:", no "Feel free to modify", no --- separators. Just the raw reply text ready to send.`;
 
   const openaiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: "system", content: systemPrompt },

@@ -1,22 +1,10 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import type { ScoredEmail } from "./page";
 
-interface Email {
-  id: string;
-  from: string;
-  subject: string;
-  date: string;
-  priority: 1 | 2 | 3;
-}
-
+type Email = ScoredEmail;
 type Filter = "all" | "high" | "medium" | "low";
-
-function PriorityDot({ priority }: { priority: 1 | 2 | 3 }) {
-  if (priority === 1) return <span className="w-2 h-2 rounded-full bg-red-500 flex-shrink-0 mt-0.5" title="High priority" />;
-  if (priority === 2) return <span className="w-2 h-2 rounded-full bg-yellow-400 flex-shrink-0 mt-0.5" title="Medium priority" />;
-  return <span className="w-2 h-2 rounded-full bg-zinc-300 flex-shrink-0 mt-0.5" title="Low priority" />;
-}
 
 interface Message {
   role: "user" | "assistant";
@@ -29,74 +17,6 @@ interface Props {
   emailContext: string;
   displayName: string;
 }
-
-function parseSender(from: string) {
-  const match = from.match(/^"?([^"<]+)"?\s*<?[^>]*>?$/);
-  return match ? match[1].trim() : from;
-}
-
-function parseEmail(from: string) {
-  const match = from.match(/<([^>]+)>/);
-  return match ? match[1] : from;
-}
-
-function formatDate(dateStr: string) {
-  try {
-    const d = new Date(dateStr);
-    const now = new Date();
-    const isToday = d.toDateString() === now.toDateString();
-    if (isToday) {
-      return d.toLocaleString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
-    }
-    return d.toLocaleString("en-US", { month: "short", day: "numeric" });
-  } catch {
-    return dateStr;
-  }
-}
-
-function renderMarkdown(text: string) {
-  return text
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*(.+?)\*/g, "<em>$1</em>")
-    .replace(/^### (.+)$/gm, "<h3 class='font-bold text-sm mt-2 mb-1'>$1</h3>")
-    .replace(/^## (.+)$/gm, "<h2 class='font-bold text-sm mt-2 mb-1'>$1</h2>")
-    .replace(/^- (.+)$/gm, "<li class='ml-4 list-disc'>$1</li>")
-    .replace(/(<li.*<\/li>\n?)+/g, (m) => `<ul class='my-1 space-y-0.5'>${m}</ul>`)
-    .replace(/\n\n/g, "<br/><br/>")
-    .replace(/\n/g, "<br/>");
-}
-
-// Strips commentary and extracts just the reply body.
-// Handles --- delimiters, "Here's a draft:" preambles, and trailing sign-off lines.
-function extractDraftBody(text: string): string {
-  // If --- markers exist, take the content between the first pair
-  const fenced = text.match(/---+\s*\n([\s\S]*?)\n\s*---+/);
-  if (fenced) return fenced[1].trim();
-
-  // Strip common preamble lines (anything ending with : on the first line)
-  const lines = text.split("\n");
-  let start = 0;
-  if (lines[0] && /^.{0,80}:\s*$/.test(lines[0].trim())) start = 1;
-  // Skip any blank lines after preamble
-  while (start < lines.length && lines[start].trim() === "") start++;
-
-  // Strip trailing commentary lines like "Feel free to..." / "Let me know..."
-  let end = lines.length;
-  while (end > start && /^(feel free|let me know|hope this|please let|don't hesitate|best regards note|note:|p\.s\.)/i.test(lines[end - 1].trim())) {
-    end--;
-  }
-
-  return lines.slice(start, end).join("\n").trim();
-}
-
-const SUGGESTED_PROMPTS = [
-  "Summarize my inbox",
-  "Any action items today?",
-  "Which emails need my attention?",
-  "Who emailed me most recently?",
-];
-
-const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024; // 25 MB Gmail limit
 
 interface Attachment {
   name: string;
@@ -112,10 +32,75 @@ interface SendModal {
   body: string;
 }
 
-function formatSize(bytes: number): string {
+type ThumbState = "up" | "down" | null;
+interface FeedbackState {
+  thumb: ThumbState;
+  isPromo: boolean;
+  localPriority?: 1 | 2 | 3;
+}
+
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+const PROMO_KEYWORDS = ["sale", "deal", "offer", "% off", "discount", "promo", "shop now"];
+
+// ── helpers ────────────────────────────────────────────────────────────────
+
+function parseSender(from: string) {
+  const match = from.match(/^"?([^"<]+)"?\s*<?[^>]*>?$/);
+  return match ? match[1].trim() : from;
+}
+
+function parseEmail(from: string) {
+  const match = from.match(/<([^>]+)>/);
+  return match ? match[1] : from;
+}
+
+function parseDomain(from: string) {
+  const addr = parseEmail(from);
+  const parts = addr.split("@");
+  return parts[1]?.toLowerCase() ?? "";
+}
+
+function formatDate(dateStr: string) {
+  try {
+    const d = new Date(dateStr);
+    const now = new Date();
+    if (d.toDateString() === now.toDateString()) {
+      return d.toLocaleString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+    }
+    return d.toLocaleString("en-US", { month: "short", day: "numeric" });
+  } catch {
+    return dateStr;
+  }
+}
+
+function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderMarkdown(text: string) {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    .replace(/^### (.+)$/gm, "<h3 class='font-bold text-sm mt-2 mb-1'>$1</h3>")
+    .replace(/^## (.+)$/gm, "<h2 class='font-bold text-sm mt-2 mb-1'>$1</h2>")
+    .replace(/^- (.+)$/gm, "<li class='ml-4 list-disc'>$1</li>")
+    .replace(/(<li.*<\/li>\n?)+/g, (m) => `<ul class='my-1 space-y-0.5'>${m}</ul>`)
+    .replace(/\n\n/g, "<br/><br/>")
+    .replace(/\n/g, "<br/>");
+}
+
+function extractDraftBody(text: string): string {
+  const fenced = text.match(/---+\s*\n([\s\S]*?)\n\s*---+/);
+  if (fenced) return fenced[1].trim();
+  const lines = text.split("\n");
+  let start = 0;
+  if (lines[0] && /^.{0,80}:\s*$/.test(lines[0].trim())) start = 1;
+  while (start < lines.length && lines[start].trim() === "") start++;
+  let end = lines.length;
+  while (end > start && /^(feel free|let me know|hope this|please let|don't hesitate|best regards note|note:|p\.s\.)/i.test(lines[end - 1].trim())) end--;
+  return lines.slice(start, end).join("\n").trim();
 }
 
 function readFileAsBase64(file: File): Promise<string> {
@@ -126,6 +111,32 @@ function readFileAsBase64(file: File): Promise<string> {
     reader.readAsDataURL(file);
   });
 }
+
+// ── sub-components ─────────────────────────────────────────────────────────
+
+function PriorityDot({ priority, reason }: { priority: 1 | 2 | 3; reason: string }) {
+  const [show, setShow] = useState(false);
+  const colors = { 1: "bg-red-500", 2: "bg-yellow-400", 3: "bg-zinc-300" };
+  return (
+    <span className="relative flex-shrink-0 mt-[3px]" onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
+      <span className={`block w-2 h-2 rounded-full ${colors[priority]} cursor-help`} />
+      {show && (
+        <span className="absolute left-4 top-0 z-20 w-52 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-[11px] text-white leading-snug shadow-lg pointer-events-none whitespace-normal">
+          {reason}
+        </span>
+      )}
+    </span>
+  );
+}
+
+const SUGGESTED_PROMPTS = [
+  "Summarize my inbox",
+  "Any action items today?",
+  "Which emails need my attention?",
+  "Who emailed me most recently?",
+];
+
+// ── main component ─────────────────────────────────────────────────────────
 
 export default function DashboardClient({ emails, emailContext, displayName }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -141,57 +152,57 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
   const [attachmentsMsgIdx, setAttachmentsMsgIdx] = useState<number | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  // feedback: keyed by email.id
+  const [feedback, setFeedback] = useState<Record<string, FeedbackState>>({});
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingAttachMsgIdx = useRef<number | null>(null);
 
+  // ── derived ──────────────────────────────────────────────────────────────
+
   const displayedEmails = useMemo(() => {
+    const withOverrides = emails.map((e) => ({
+      ...e,
+      priority: (feedback[e.id]?.localPriority ?? e.priority) as 1 | 2 | 3,
+    }));
     const filtered =
-      filter === "high" ? emails.filter((e) => e.priority === 1) :
-      filter === "medium" ? emails.filter((e) => e.priority === 2) :
-      filter === "low" ? emails.filter((e) => e.priority === 3) :
-      emails;
+      filter === "high" ? withOverrides.filter((e) => e.priority === 1) :
+      filter === "medium" ? withOverrides.filter((e) => e.priority === 2) :
+      filter === "low" ? withOverrides.filter((e) => e.priority === 3) :
+      withOverrides;
     return [...filtered].sort((a, b) => a.priority - b.priority);
-  }, [emails, filter]);
+  }, [emails, filter, feedback]);
+
+  const highEmails = useMemo(() => emails.filter((e) => (feedback[e.id]?.localPriority ?? e.priority) === 1), [emails, feedback]);
+  const mostUrgent = highEmails[0] ?? null;
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // ── chat ─────────────────────────────────────────────────────────────────
+
   async function sendMessage(text: string, markAsDraft = false) {
     if (!text.trim() || isLoading) return;
     const userMessage: Message = { role: "user", content: text.trim() };
     const newMessages = [...messages, userMessage];
-    setMessages(newMessages);
+    setMessages([...newMessages, { role: "assistant", content: "", isDraft: markAsDraft }]);
     setInput("");
     setIsLoading(true);
-
-    const assistantPlaceholder: Message = { role: "assistant", content: "", isDraft: markAsDraft };
-    setMessages([...newMessages, assistantPlaceholder]);
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: newMessages,
-          emailContext,
-          emailCount: emails.length,
-          selectedEmailId,
-          selectedEmailBody,
-        }),
+        body: JSON.stringify({ messages: newMessages, emailContext, emailCount: emails.length, selectedEmailId, selectedEmailBody }),
       });
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(errText || `HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 
       const reader = res.body!.getReader();
       const decoder = new TextDecoder();
       let fullText = "";
-
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -200,100 +211,120 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      setMessages([
-        ...newMessages,
-        { role: "assistant", content: `**Error:** ${msg}` },
-      ]);
+      setMessages([...newMessages, { role: "assistant", content: `**Error:** ${msg}` }]);
     } finally {
       setIsLoading(false);
     }
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage(input);
-    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(input); }
   }
+
+  // ── email selection ───────────────────────────────────────────────────────
 
   const selectedEmail = selectedEmailId ? emails.find((e) => e.id === selectedEmailId) : null;
 
   async function selectEmail(id: string | null) {
     setSelectedEmailId(id);
     setSelectedEmailBody(null);
-    if (id) {
-      setIsBodyLoading(true);
-      try {
-        const res = await fetch(`/api/gmail/email/${id}`);
-        if (res.ok) {
-          const { body } = await res.json();
-          setSelectedEmailBody(body);
-        }
-      } catch {
-        // silently fail — body just won't be in context
-      } finally {
-        setIsBodyLoading(false);
-      }
-    }
+    if (!id) return;
+    setIsBodyLoading(true);
+    try {
+      const res = await fetch(`/api/gmail/email/${id}`);
+      if (res.ok) setSelectedEmailBody((await res.json()).body);
+    } catch { /* silent */ } finally { setIsBodyLoading(false); }
   }
 
   function draftReply() {
     if (!selectedEmail) return;
-    const prompt = `Draft a reply to this email from ${parseSender(selectedEmail.from)} about "${selectedEmail.subject}"`;
-    sendMessage(prompt, true);
+    sendMessage(`Draft a reply to this email from ${parseSender(selectedEmail.from)} about "${selectedEmail.subject}"`, true);
   }
 
-  async function copyToClipboard(text: string, idx: number) {
+  // ── feedback ─────────────────────────────────────────────────────────────
+
+  async function saveFeedback(email: Email, feedbackType: "thumbs_up" | "thumbs_down" | "mark_promo", correctPriority: 1 | 2 | 3) {
+    // Optimistic local update
+    setFeedback((prev) => ({
+      ...prev,
+      [email.id]: {
+        thumb: feedbackType === "thumbs_up" ? "up" : feedbackType === "thumbs_down" ? "down" : prev[email.id]?.thumb ?? null,
+        isPromo: feedbackType === "mark_promo" || (prev[email.id]?.isPromo ?? false),
+        localPriority: correctPriority,
+      },
+    }));
+
     try {
-      await navigator.clipboard.writeText(text);
-      setCopiedIdx(idx);
-      setTimeout(() => setCopiedIdx(null), 2000);
-    } catch {
-      // clipboard not available
-    }
+      await fetch("/api/priority/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          emailId: email.id,
+          sender: email.from,
+          senderDomain: parseDomain(email.from),
+          subject: email.subject,
+          originalPriority: email.priority,
+          correctPriority,
+          feedbackType,
+        }),
+      });
+    } catch { /* silent — local state already updated */ }
   }
+
+  function handleThumbsUp(email: Email) {
+    saveFeedback(email, "thumbs_up", email.priority);
+    showToast("Feedback saved ✓");
+  }
+
+  function handleThumbsDown(email: Email) {
+    // Downgrade: 1→2, 2→3, 3→3
+    const corrected: 1 | 2 | 3 = email.priority === 1 ? 2 : 3;
+    saveFeedback(email, "thumbs_down", corrected);
+    showToast("Priority lowered");
+  }
+
+  function handleMarkPromo(email: Email) {
+    saveFeedback(email, "mark_promo", 3);
+    showToast("Marked as promo — AI will learn this sender");
+  }
+
+  function showToast(msg: string, ms = 3000) {
+    setToast(msg);
+    setTimeout(() => setToast(null), ms);
+  }
+
+  // ── attachments ───────────────────────────────────────────────────────────
+
+  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const msgIdx = pendingAttachMsgIdx.current;
+    if (msgIdx !== null) setAttachmentsMsgIdx(msgIdx);
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = "";
+    for (const file of files) {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        showToast("File too large — Gmail limit is 25MB", 4000);
+        continue;
+      }
+      try {
+        const base64 = await readFileAsBase64(file);
+        setAttachments((prev) => [...prev, { name: file.name, size: file.size, mimeType: file.type || "application/octet-stream", base64 }]);
+      } catch { showToast("Failed to read file"); }
+    }
+  }, []);
+
+  // ── send modal ────────────────────────────────────────────────────────────
 
   function openSendModal(msg: Message) {
     if (!selectedEmail) return;
     setSendModal({
       to: parseEmail(selectedEmail.from),
       senderName: parseSender(selectedEmail.from),
-      subject: selectedEmail.subject.startsWith("Re:")
-        ? selectedEmail.subject
-        : `Re: ${selectedEmail.subject}`,
+      subject: selectedEmail.subject.startsWith("Re:") ? selectedEmail.subject : `Re: ${selectedEmail.subject}`,
       body: extractDraftBody(msg.content),
     });
   }
 
-  function closeModal() {
-    setSendModal(null);
-    setAttachments([]);
-    setAttachmentsMsgIdx(null);
-  }
-
-  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const msgIdx = pendingAttachMsgIdx.current;
-    if (msgIdx !== null) setAttachmentsMsgIdx(msgIdx);
-    const files = Array.from(e.target.files ?? []);
-    e.target.value = ""; // reset so same file can be re-added after removal
-    for (const file of files) {
-      if (file.size > MAX_ATTACHMENT_BYTES) {
-        setToast(`File too large — Gmail limit is 25MB`);
-        setTimeout(() => setToast(null), 4000);
-        continue;
-      }
-      try {
-        const base64 = await readFileAsBase64(file);
-        setAttachments((prev) => [
-          ...prev,
-          { name: file.name, size: file.size, mimeType: file.type || "application/octet-stream", base64 },
-        ]);
-      } catch {
-        setToast("Failed to read file");
-        setTimeout(() => setToast(null), 3500);
-      }
-    }
-  }, []);
+  function closeModal() { setSendModal(null); setAttachments([]); setAttachmentsMsgIdx(null); }
 
   async function confirmSend() {
     if (!sendModal) return;
@@ -303,33 +334,46 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          to: sendModal.to,
-          subject: sendModal.subject,
-          body: sendModal.body,
+          to: sendModal.to, subject: sendModal.subject, body: sendModal.body,
           attachments: attachments.map(({ name, mimeType, base64 }) => ({ name, mimeType, base64 })),
         }),
       });
-      if (!res.ok) {
-        const { error } = await res.json();
-        throw new Error(error || "Send failed");
-      }
+      if (!res.ok) throw new Error((await res.json()).error || "Send failed");
       closeModal();
-      setToast(`Reply sent to ${sendModal.senderName} ✓`);
-      setTimeout(() => setToast(null), 3500);
+      showToast(`Reply sent to ${sendModal.senderName} ✓`);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      setToast(`Failed to send: ${msg}`);
-      setTimeout(() => setToast(null), 4000);
-    } finally {
-      setIsSending(false);
-    }
+      showToast(`Failed to send: ${err instanceof Error ? err.message : "Unknown error"}`, 4000);
+    } finally { setIsSending(false); }
   }
+
+  async function copyToClipboard(text: string, idx: number) {
+    try { await navigator.clipboard.writeText(text); setCopiedIdx(idx); setTimeout(() => setCopiedIdx(null), 2000); } catch { /* silent */ }
+  }
+
+  // ── render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="flex h-full">
-      {/* Left panel — email list */}
+
+      {/* ── Left panel ──────────────────────────────────────────────────── */}
       <aside className="w-[30%] flex-shrink-0 border-r border-zinc-200 flex flex-col bg-zinc-50">
-        {/* Header + filter buttons */}
+
+        {/* Daily digest card */}
+        {highEmails.length > 0 && (
+          <div className="mx-3 mt-3 rounded-xl bg-red-50 border border-red-100 px-3 py-2.5 flex-shrink-0">
+            <p className="text-[11px] font-semibold text-red-700 mb-0.5">
+              🔴 {highEmails.length} high priority email{highEmails.length > 1 ? "s" : ""} today
+            </p>
+            {mostUrgent && (
+              <p className="text-[11px] text-red-600 truncate">
+                Most urgent: <span className="font-medium">{mostUrgent.subject || "(no subject)"}</span>
+                {" "}from {parseSender(mostUrgent.from)}
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Header + filter */}
         <div className="px-4 py-3 border-b border-zinc-200 bg-white flex-shrink-0">
           <div className="flex items-center justify-between mb-2">
             <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Inbox</p>
@@ -337,51 +381,73 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
           </div>
           <div className="flex gap-1">
             {(["all", "high", "medium", "low"] as Filter[]).map((f) => {
-              const labels: Record<Filter, string> = { all: "All", high: "🔴 High", medium: "🟡 Medium", low: "⚪ Low" };
-              const active = filter === f;
+              const labels: Record<Filter, string> = { all: "All", high: "🔴", medium: "🟡", low: "⚪" };
+              const fullLabels: Record<Filter, string> = { all: "All", high: "High", medium: "Med", low: "Low" };
               return (
                 <button
                   key={f}
                   onClick={() => setFilter(f)}
-                  className={`flex-1 rounded-md py-1 text-[10px] font-medium transition-colors ${
-                    active
-                      ? "bg-violet-600 text-white"
-                      : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200"
-                  }`}
+                  className={`flex-1 rounded-md py-1 text-[10px] font-medium transition-colors ${filter === f ? "bg-violet-600 text-white" : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200"}`}
                 >
-                  {labels[f]}
+                  {labels[f]} {fullLabels[f]}
                 </button>
               );
             })}
           </div>
         </div>
+
+        {/* Email list */}
         <ul className="flex-1 overflow-y-auto divide-y divide-zinc-100">
           {displayedEmails.map((email) => {
             const isSelected = email.id === selectedEmailId;
+            const fb = feedback[email.id];
+            const effectivePriority = fb?.localPriority ?? email.priority;
             return (
               <li
                 key={email.id}
                 onClick={() => selectEmail(isSelected ? null : email.id)}
-                className={`px-4 py-3 cursor-pointer transition-colors ${
-                  isSelected
-                    ? "bg-violet-50 border-l-2 border-l-violet-500"
-                    : "hover:bg-white border-l-2 border-l-transparent"
-                }`}
+                className={`px-3 py-2.5 cursor-pointer transition-colors ${isSelected ? "bg-violet-50 border-l-2 border-l-violet-500" : "hover:bg-white border-l-2 border-l-transparent"}`}
               >
-                <div className="flex items-start gap-2 mb-0.5">
-                  <PriorityDot priority={email.priority} />
+                <div className="flex items-start gap-2">
+                  <PriorityDot priority={effectivePriority} reason={email.reason} />
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center justify-between gap-1.5">
                       <span className={`text-xs font-semibold truncate ${isSelected ? "text-violet-700" : "text-zinc-800"}`}>
                         {parseSender(email.from)}
                       </span>
-                      <span className="text-[10px] text-zinc-400 flex-shrink-0">
-                        {formatDate(email.date)}
-                      </span>
+                      <span className="text-[10px] text-zinc-400 flex-shrink-0">{formatDate(email.date)}</span>
                     </div>
-                    <p className="text-xs text-zinc-500 truncate leading-relaxed">
-                      {email.subject || "(no subject)"}
-                    </p>
+                    <p className="text-xs text-zinc-500 truncate leading-relaxed">{email.subject || "(no subject)"}</p>
+
+                    {/* Feedback + mark promo row */}
+                    <div className="flex items-center gap-1 mt-1" onClick={(e) => e.stopPropagation()}>
+                      {/* Thumbs up */}
+                      <button
+                        onClick={() => handleThumbsUp(email)}
+                        title="Priority is correct"
+                        className={`text-[10px] rounded px-1 py-0.5 transition-colors ${fb?.thumb === "up" ? "bg-green-100 text-green-700" : "text-zinc-400 hover:text-green-600 hover:bg-green-50"}`}
+                      >
+                        👍
+                      </button>
+                      {/* Thumbs down */}
+                      <button
+                        onClick={() => handleThumbsDown(email)}
+                        title="Lower this priority"
+                        className={`text-[10px] rounded px-1 py-0.5 transition-colors ${fb?.thumb === "down" ? "bg-red-100 text-red-600" : "text-zinc-400 hover:text-red-500 hover:bg-red-50"}`}
+                      >
+                        👎
+                      </button>
+                      {/* Mark as promo */}
+                      {effectivePriority !== 3 && !PROMO_KEYWORDS.some(k => email.subject.toLowerCase().includes(k)) && (
+                        <button
+                          onClick={() => handleMarkPromo(email)}
+                          title="Mark as promotional — AI will learn this sender"
+                          className={`text-[10px] rounded px-1.5 py-0.5 transition-colors ${fb?.isPromo ? "bg-orange-100 text-orange-600" : "text-zinc-400 hover:text-orange-500 hover:bg-orange-50"}`}
+                        >
+                          {fb?.isPromo ? "Promo ✓" : "Promo"}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               </li>
@@ -393,7 +459,7 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
         </ul>
       </aside>
 
-      {/* Right panel — preview + chat */}
+      {/* ── Right panel ─────────────────────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0 bg-white">
 
         {/* Email preview pane */}
@@ -420,12 +486,7 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
                   </svg>
                   Draft Reply
                 </button>
-                <button
-                  onClick={() => selectEmail(null)}
-                  className="w-6 h-6 flex items-center justify-center rounded-md text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors text-sm"
-                >
-                  ✕
-                </button>
+                <button onClick={() => selectEmail(null)} className="w-6 h-6 flex items-center justify-center rounded-md text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors text-sm">✕</button>
               </div>
             </div>
             <div className="px-6 py-3 overflow-y-auto flex-1">
@@ -462,21 +523,11 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
                   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                 </svg>
               </div>
-              <p className="text-base font-semibold text-zinc-800 mb-1">
-                Hi {displayName}, I&apos;m MailMind
-              </p>
-              <p className="text-sm text-zinc-500 max-w-sm mb-6">
-                I have your last {emails.length} emails loaded. Ask me anything about your inbox.
-              </p>
+              <p className="text-base font-semibold text-zinc-800 mb-1">Hi {displayName}, I&apos;m MailMind</p>
+              <p className="text-sm text-zinc-500 max-w-sm mb-6">I have your last {emails.length} emails loaded. Ask me anything about your inbox.</p>
               <div className="flex flex-wrap gap-2 justify-center">
                 {SUGGESTED_PROMPTS.map((p) => (
-                  <button
-                    key={p}
-                    onClick={() => sendMessage(p)}
-                    className="rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:border-violet-300 hover:text-violet-700 hover:bg-violet-50 transition-colors"
-                  >
-                    {p}
-                  </button>
+                  <button key={p} onClick={() => sendMessage(p)} className="rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 hover:border-violet-300 hover:text-violet-700 hover:bg-violet-50 transition-colors">{p}</button>
                 ))}
               </div>
             </div>
@@ -490,13 +541,7 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
                 </div>
               )}
               <div className="flex flex-col gap-1.5 max-w-[75%]">
-                <div
-                  className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-                    msg.role === "user"
-                      ? "bg-violet-600 text-white rounded-br-sm"
-                      : "bg-zinc-100 text-zinc-800 rounded-bl-sm"
-                  }`}
-                >
+                <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${msg.role === "user" ? "bg-violet-600 text-white rounded-br-sm" : "bg-zinc-100 text-zinc-800 rounded-bl-sm"}`}>
                   {msg.role === "assistant" ? (
                     isLoading && i === messages.length - 1 && msg.content === "" ? (
                       <div className="flex items-center gap-1 py-1">
@@ -507,83 +552,42 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
                     ) : (
                       <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
                     )
-                  ) : (
-                    msg.content
-                  )}
+                  ) : msg.content}
                 </div>
-                {/* Action buttons for draft replies */}
+
+                {/* Draft action buttons */}
                 {msg.role === "assistant" && msg.isDraft && msg.content && !(isLoading && i === messages.length - 1) && (
                   <div className="flex flex-col gap-1.5">
                     <div className="flex items-center gap-2">
-                      {/* Copy */}
-                      <button
-                        onClick={() => copyToClipboard(msg.content, i)}
-                        className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-500 hover:border-violet-300 hover:text-violet-600 hover:bg-violet-50 transition-colors"
-                      >
+                      <button onClick={() => copyToClipboard(msg.content, i)} className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-500 hover:border-violet-300 hover:text-violet-600 hover:bg-violet-50 transition-colors">
                         {copiedIdx === i ? (
-                          <>
-                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                              <polyline points="20 6 9 17 4 12" />
-                            </svg>
-                            Copied!
-                          </>
+                          <><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>Copied!</>
                         ) : (
-                          <>
-                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                            </svg>
-                            Copy
-                          </>
+                          <><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>Copy</>
                         )}
                       </button>
-                      {/* Send Reply */}
                       {selectedEmail && (
-                        <button
-                          onClick={() => openSendModal(msg)}
-                          className="flex items-center gap-1.5 rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-medium text-violet-700 hover:bg-violet-100 hover:border-violet-300 transition-colors"
-                        >
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                            <line x1="22" y1="2" x2="11" y2="13" />
-                            <polygon points="22 2 15 22 11 13 2 9 22 2" />
-                          </svg>
+                        <button onClick={() => openSendModal(msg)} className="flex items-center gap-1.5 rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-medium text-violet-700 hover:bg-violet-100 hover:border-violet-300 transition-colors">
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
                           Send Reply
                         </button>
                       )}
-                      {/* Paperclip */}
                       <button
-                        onClick={() => {
-                          pendingAttachMsgIdx.current = i;
-                          fileInputRef.current?.click();
-                        }}
-                        title="Attach a file"
+                        onClick={() => { pendingAttachMsgIdx.current = i; fileInputRef.current?.click(); }}
                         className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-500 hover:border-zinc-300 hover:text-zinc-700 transition-colors"
                       >
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-                        </svg>
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
                         Attach
                       </button>
                     </div>
-                    {/* Attachment chips below this message's buttons */}
                     {attachmentsMsgIdx === i && attachments.length > 0 && (
                       <div className="flex flex-wrap gap-1.5">
                         {attachments.map((att, j) => (
-                          <div
-                            key={j}
-                            className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[11px] text-zinc-700"
-                          >
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-                            </svg>
+                          <div key={j} className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[11px] text-zinc-700">
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
                             <span className="max-w-[120px] truncate font-medium">{att.name}</span>
                             <span className="text-zinc-400">{formatSize(att.size)}</span>
-                            <button
-                              onClick={() => setAttachments((prev) => prev.filter((_, k) => k !== j))}
-                              className="text-zinc-400 hover:text-zinc-700 transition-colors leading-none"
-                            >
-                              ✕
-                            </button>
+                            <button onClick={() => setAttachments((p) => p.filter((_, k) => k !== j))} className="text-zinc-400 hover:text-zinc-700 transition-colors">✕</button>
                           </div>
                         ))}
                       </div>
@@ -600,146 +604,65 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
         <div className="px-6 py-4 border-t border-zinc-200 bg-white flex-shrink-0">
           <div className="flex items-end gap-3 rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-2.5 focus-within:border-violet-400 focus-within:ring-2 focus-within:ring-violet-100 transition-all">
             <textarea
-              ref={inputRef}
-              rows={1}
-              value={input}
-              onChange={(e) => {
-                setInput(e.target.value);
-                e.target.style.height = "auto";
-                e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
-              }}
+              ref={inputRef} rows={1} value={input}
+              onChange={(e) => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; }}
               onKeyDown={handleKeyDown}
               placeholder="Ask anything about your inbox..."
               className="flex-1 bg-transparent text-sm text-zinc-900 placeholder:text-zinc-400 resize-none outline-none leading-relaxed"
-              style={{ minHeight: "24px", maxHeight: "120px" }}
-              disabled={isLoading}
+              style={{ minHeight: "24px", maxHeight: "120px" }} disabled={isLoading}
             />
-            <button
-              onClick={() => sendMessage(input)}
-              disabled={!input.trim() || isLoading}
-              className="flex-shrink-0 w-8 h-8 rounded-xl bg-violet-600 flex items-center justify-center text-white hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
+            <button onClick={() => sendMessage(input)} disabled={!input.trim() || isLoading} className="flex-shrink-0 w-8 h-8 rounded-xl bg-violet-600 flex items-center justify-center text-white hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
               {isLoading ? (
-                <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-                </svg>
+                <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" /></svg>
               ) : (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="22" y1="2" x2="11" y2="13" />
-                  <polygon points="22 2 15 22 11 13 2 9 22 2" />
-                </svg>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
               )}
             </button>
           </div>
-          <p className="mt-1.5 text-[10px] text-zinc-400 text-center">
-            Enter to send · Shift+Enter for new line · Click an email on the left to focus it
-          </p>
+          <p className="mt-1.5 text-[10px] text-zinc-400 text-center">Enter to send · Shift+Enter for new line · Click an email on the left to focus it</p>
         </div>
       </div>
 
-      {/* Hidden file input */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        className="hidden"
-        onChange={handleFileSelect}
-      />
+      {/* ── Hidden file input ────────────────────────────────────────────── */}
+      <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
 
-      {/* Send confirmation modal */}
+      {/* ── Send modal ───────────────────────────────────────────────────── */}
       {sendModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          {/* Backdrop */}
-          <div
-            className="absolute inset-0 bg-black/30 backdrop-blur-sm"
-            onClick={() => !isSending && closeModal()}
-          />
-          {/* Modal */}
+          <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={() => !isSending && closeModal()} />
           <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-md p-6 flex flex-col gap-4">
             <div>
               <h2 className="text-base font-semibold text-zinc-900">Send this reply?</h2>
-              <p className="text-sm text-zinc-500 mt-0.5">
-                To: <span className="font-medium text-zinc-700">{sendModal.senderName}</span>
-                <span className="text-zinc-400 ml-1">({sendModal.to})</span>
-              </p>
+              <p className="text-sm text-zinc-500 mt-0.5">To: <span className="font-medium text-zinc-700">{sendModal.senderName}</span> <span className="text-zinc-400">({sendModal.to})</span></p>
               <p className="text-xs text-zinc-400 mt-0.5">Subject: {sendModal.subject}</p>
             </div>
-
-            {/* Draft preview */}
             <div className="rounded-xl bg-zinc-50 border border-zinc-200 px-4 py-3 max-h-40 overflow-y-auto">
               <p className="text-xs text-zinc-700 whitespace-pre-wrap leading-relaxed">{sendModal.body}</p>
             </div>
-
-            {/* Attachment chips */}
             {attachments.length > 0 && (
               <div className="flex flex-wrap gap-2">
                 {attachments.map((att, i) => (
-                  <div
-                    key={i}
-                    className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-xs text-zinc-700"
-                  >
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-                    </svg>
+                  <div key={i} className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-xs text-zinc-700">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
                     <span className="max-w-[140px] truncate font-medium">{att.name}</span>
                     <span className="text-zinc-400">{formatSize(att.size)}</span>
-                    <button
-                      onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
-                      className="ml-0.5 text-zinc-400 hover:text-zinc-700 transition-colors"
-                      aria-label="Remove attachment"
-                    >
-                      ✕
-                    </button>
+                    <button onClick={() => setAttachments((p) => p.filter((_, j) => j !== i))} className="ml-0.5 text-zinc-400 hover:text-zinc-700 transition-colors">✕</button>
                   </div>
                 ))}
               </div>
             )}
-
-            {/* Actions */}
             <div className="flex items-center justify-between">
-              {/* Paperclip */}
-              <button
-                onClick={() => { pendingAttachMsgIdx.current = attachmentsMsgIdx; fileInputRef.current?.click(); }}
-                disabled={isSending}
-                title="Attach a file"
-                className="flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-500 hover:border-zinc-300 hover:text-zinc-700 disabled:opacity-50 transition-colors"
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-                </svg>
+              <button onClick={() => { pendingAttachMsgIdx.current = attachmentsMsgIdx; fileInputRef.current?.click(); }} disabled={isSending} className="flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-500 hover:border-zinc-300 hover:text-zinc-700 disabled:opacity-50 transition-colors">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
                 Attach
               </button>
-
               <div className="flex gap-2">
-                <button
-                  onClick={closeModal}
-                  disabled={isSending}
-                  className="rounded-xl border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={confirmSend}
-                  disabled={isSending}
-                  className="flex items-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
-                >
+                <button onClick={closeModal} disabled={isSending} className="rounded-xl border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors">Cancel</button>
+                <button onClick={confirmSend} disabled={isSending} className="flex items-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50 transition-colors">
                   {isSending ? (
-                    <>
-                      <svg className="animate-spin w-3.5 h-3.5" viewBox="0 0 24 24" fill="none">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-                      </svg>
-                      Sending...
-                    </>
+                    <><svg className="animate-spin w-3.5 h-3.5" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" /></svg>Sending...</>
                   ) : (
-                    <>
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                        <line x1="22" y1="2" x2="11" y2="13" />
-                        <polygon points="22 2 15 22 11 13 2 9 22 2" />
-                      </svg>
-                      Send
-                    </>
+                    <><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>Send</>
                   )}
                 </button>
               </div>
@@ -748,18 +671,12 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
         </div>
       )}
 
-      {/* Success / error toast */}
+      {/* ── Toast ────────────────────────────────────────────────────────── */}
       {toast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50">
-          <div className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium shadow-lg ${
-            toast.startsWith("Failed")
-              ? "bg-red-600 text-white"
-              : "bg-zinc-900 text-white"
-          }`}>
-            {!toast.startsWith("Failed") && (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
+          <div className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium shadow-lg ${toast.startsWith("Failed") || toast.startsWith("File too large") ? "bg-red-600 text-white" : "bg-zinc-900 text-white"}`}>
+            {!toast.startsWith("Failed") && !toast.startsWith("File too large") && (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
             )}
             {toast}
           </div>

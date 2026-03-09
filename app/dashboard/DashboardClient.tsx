@@ -128,11 +128,13 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [sendModal, setSendModal] = useState<SendModal | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachmentsMsgIdx, setAttachmentsMsgIdx] = useState<number | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pendingAttachMsgIdx = useRef<number | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -234,7 +236,6 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
 
   function openSendModal(msg: Message) {
     if (!selectedEmail) return;
-    setAttachments([]);
     setSendModal({
       to: parseEmail(selectedEmail.from),
       senderName: parseSender(selectedEmail.from),
@@ -248,9 +249,12 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
   function closeModal() {
     setSendModal(null);
     setAttachments([]);
+    setAttachmentsMsgIdx(null);
   }
 
   const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const msgIdx = pendingAttachMsgIdx.current;
+    if (msgIdx !== null) setAttachmentsMsgIdx(msgIdx);
     const files = Array.from(e.target.files ?? []);
     e.target.value = ""; // reset so same file can be re-added after removal
     for (const file of files) {
@@ -460,39 +464,80 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
                 </div>
                 {/* Action buttons for draft replies */}
                 {msg.role === "assistant" && msg.isDraft && msg.content && !(isLoading && i === messages.length - 1) && (
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => copyToClipboard(msg.content, i)}
-                      className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-500 hover:border-violet-300 hover:text-violet-600 hover:bg-violet-50 transition-colors"
-                    >
-                      {copiedIdx === i ? (
-                        <>
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                            <polyline points="20 6 9 17 4 12" />
-                          </svg>
-                          Copied!
-                        </>
-                      ) : (
-                        <>
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                          </svg>
-                          Copy
-                        </>
-                      )}
-                    </button>
-                    {selectedEmail && (
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center gap-2">
+                      {/* Copy */}
                       <button
-                        onClick={() => openSendModal(msg)}
-                        className="flex items-center gap-1.5 rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-medium text-violet-700 hover:bg-violet-100 hover:border-violet-300 transition-colors"
+                        onClick={() => copyToClipboard(msg.content, i)}
+                        className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-500 hover:border-violet-300 hover:text-violet-600 hover:bg-violet-50 transition-colors"
                       >
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                          <line x1="22" y1="2" x2="11" y2="13" />
-                          <polygon points="22 2 15 22 11 13 2 9 22 2" />
-                        </svg>
-                        Send Reply
+                        {copiedIdx === i ? (
+                          <>
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                            Copied!
+                          </>
+                        ) : (
+                          <>
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                            </svg>
+                            Copy
+                          </>
+                        )}
                       </button>
+                      {/* Send Reply */}
+                      {selectedEmail && (
+                        <button
+                          onClick={() => openSendModal(msg)}
+                          className="flex items-center gap-1.5 rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-medium text-violet-700 hover:bg-violet-100 hover:border-violet-300 transition-colors"
+                        >
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="22" y1="2" x2="11" y2="13" />
+                            <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                          </svg>
+                          Send Reply
+                        </button>
+                      )}
+                      {/* Paperclip */}
+                      <button
+                        onClick={() => {
+                          pendingAttachMsgIdx.current = i;
+                          fileInputRef.current?.click();
+                        }}
+                        title="Attach a file"
+                        className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-500 hover:border-zinc-300 hover:text-zinc-700 transition-colors"
+                      >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                        </svg>
+                        Attach
+                      </button>
+                    </div>
+                    {/* Attachment chips below this message's buttons */}
+                    {attachmentsMsgIdx === i && attachments.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5">
+                        {attachments.map((att, j) => (
+                          <div
+                            key={j}
+                            className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[11px] text-zinc-700"
+                          >
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                            </svg>
+                            <span className="max-w-[120px] truncate font-medium">{att.name}</span>
+                            <span className="text-zinc-400">{formatSize(att.size)}</span>
+                            <button
+                              onClick={() => setAttachments((prev) => prev.filter((_, k) => k !== j))}
+                              className="text-zinc-400 hover:text-zinc-700 transition-colors leading-none"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ))}
+                      </div>
                     )}
                   </div>
                 )}
@@ -606,7 +651,7 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
             <div className="flex items-center justify-between">
               {/* Paperclip */}
               <button
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => { pendingAttachMsgIdx.current = attachmentsMsgIdx; fileInputRef.current?.click(); }}
                 disabled={isSending}
                 title="Attach a file"
                 className="flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-500 hover:border-zinc-300 hover:text-zinc-700 disabled:opacity-50 transition-colors"

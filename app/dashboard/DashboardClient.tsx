@@ -1,12 +1,21 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 
 interface Email {
   id: string;
   from: string;
   subject: string;
   date: string;
+  priority: 1 | 2 | 3;
+}
+
+type Filter = "all" | "high" | "medium" | "low";
+
+function PriorityDot({ priority }: { priority: 1 | 2 | 3 }) {
+  if (priority === 1) return <span className="w-2 h-2 rounded-full bg-red-500 flex-shrink-0 mt-0.5" title="High priority" />;
+  if (priority === 2) return <span className="w-2 h-2 rounded-full bg-yellow-400 flex-shrink-0 mt-0.5" title="Medium priority" />;
+  return <span className="w-2 h-2 rounded-full bg-zinc-300 flex-shrink-0 mt-0.5" title="Low priority" />;
 }
 
 interface Message {
@@ -121,6 +130,7 @@ function readFileAsBase64(file: File): Promise<string> {
 export default function DashboardClient({ emails, emailContext, displayName }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const [filter, setFilter] = useState<Filter>("all");
   const [selectedEmailId, setSelectedEmailId] = useState<string | null>(null);
   const [selectedEmailBody, setSelectedEmailBody] = useState<string | null>(null);
   const [isBodyLoading, setIsBodyLoading] = useState(false);
@@ -135,6 +145,15 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingAttachMsgIdx = useRef<number | null>(null);
+
+  const displayedEmails = useMemo(() => {
+    const filtered =
+      filter === "high" ? emails.filter((e) => e.priority === 1) :
+      filter === "medium" ? emails.filter((e) => e.priority === 2) :
+      filter === "low" ? emails.filter((e) => e.priority === 3) :
+      emails;
+    return [...filtered].sort((a, b) => a.priority - b.priority);
+  }, [emails, filter]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -310,12 +329,34 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
     <div className="flex h-full">
       {/* Left panel — email list */}
       <aside className="w-[30%] flex-shrink-0 border-r border-zinc-200 flex flex-col bg-zinc-50">
-        <div className="px-4 py-3 border-b border-zinc-200 bg-white">
-          <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Inbox</p>
-          <p className="text-xs text-zinc-400 mt-0.5">{emails.length} recent emails</p>
+        {/* Header + filter buttons */}
+        <div className="px-4 py-3 border-b border-zinc-200 bg-white flex-shrink-0">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Inbox</p>
+            <p className="text-xs text-zinc-400">{displayedEmails.length} emails</p>
+          </div>
+          <div className="flex gap-1">
+            {(["all", "high", "medium", "low"] as Filter[]).map((f) => {
+              const labels: Record<Filter, string> = { all: "All", high: "🔴 High", medium: "🟡 Medium", low: "⚪ Low" };
+              const active = filter === f;
+              return (
+                <button
+                  key={f}
+                  onClick={() => setFilter(f)}
+                  className={`flex-1 rounded-md py-1 text-[10px] font-medium transition-colors ${
+                    active
+                      ? "bg-violet-600 text-white"
+                      : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200"
+                  }`}
+                >
+                  {labels[f]}
+                </button>
+              );
+            })}
+          </div>
         </div>
         <ul className="flex-1 overflow-y-auto divide-y divide-zinc-100">
-          {emails.map((email) => {
+          {displayedEmails.map((email) => {
             const isSelected = email.id === selectedEmailId;
             return (
               <li
@@ -327,20 +368,28 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
                     : "hover:bg-white border-l-2 border-l-transparent"
                 }`}
               >
-                <div className="flex items-center justify-between gap-2 mb-0.5">
-                  <span className={`text-xs font-semibold truncate ${isSelected ? "text-violet-700" : "text-zinc-800"}`}>
-                    {parseSender(email.from)}
-                  </span>
-                  <span className="text-[10px] text-zinc-400 flex-shrink-0">
-                    {formatDate(email.date)}
-                  </span>
+                <div className="flex items-start gap-2 mb-0.5">
+                  <PriorityDot priority={email.priority} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={`text-xs font-semibold truncate ${isSelected ? "text-violet-700" : "text-zinc-800"}`}>
+                        {parseSender(email.from)}
+                      </span>
+                      <span className="text-[10px] text-zinc-400 flex-shrink-0">
+                        {formatDate(email.date)}
+                      </span>
+                    </div>
+                    <p className="text-xs text-zinc-500 truncate leading-relaxed">
+                      {email.subject || "(no subject)"}
+                    </p>
+                  </div>
                 </div>
-                <p className="text-xs text-zinc-500 truncate leading-relaxed">
-                  {email.subject || "(no subject)"}
-                </p>
               </li>
             );
           })}
+          {displayedEmails.length === 0 && (
+            <li className="px-4 py-6 text-center text-xs text-zinc-400">No emails in this category</li>
+          )}
         </ul>
       </aside>
 

@@ -3,7 +3,10 @@ import { UserButton } from "@clerk/nextjs";
 import Link from "next/link";
 import { supabaseAdmin } from "@/lib/supabase";
 import { google } from "googleapis";
+import OpenAI from "openai";
 import DashboardClient from "./DashboardClient";
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 interface Email {
   id: string;
@@ -11,9 +14,10 @@ interface Email {
   subject: string;
   date: string;
   snippet: string;
+  priority: 1 | 2 | 3;
 }
 
-async function fetchEmails(accessToken: string, refreshToken: string | null): Promise<Email[]> {
+async function fetchEmails(accessToken: string, refreshToken: string | null): Promise<Omit<Email, "priority">[]> {
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET
@@ -24,7 +28,7 @@ async function fetchEmails(accessToken: string, refreshToken: string | null): Pr
   const listRes = await gmail.users.messages.list({ userId: "me", maxResults: 20 });
   const messages = listRes.data.messages ?? [];
 
-  const emails = await Promise.all(
+  return Promise.all(
     messages.map(async (msg) => {
       const detail = await gmail.users.messages.get({
         userId: "me",
@@ -37,8 +41,39 @@ async function fetchEmails(accessToken: string, refreshToken: string | null): Pr
       return { id: msg.id!, from: get("From"), subject: get("Subject"), date: get("Date"), snippet: detail.data.snippet ?? "" };
     })
   );
+}
 
-  return emails;
+async function scorePriorities(emails: Omit<Email, "priority">[]): Promise<(1 | 2 | 3)[]> {
+  if (emails.length === 0) return [];
+  const list = emails
+    .map((e, i) => `${i + 1}. From: ${e.from} | Subject: ${e.subject} | Snippet: ${e.snippet.slice(0, 80)}`)
+    .join("\n");
+
+  try {
+    const res = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "user",
+          content: `Score each email 1–3:\n1=High (needs reply, urgent, from a real person)\n2=Medium (newsletter, notification worth reading)\n3=Low (promo, marketing, automated)\n\nReturn ONLY a JSON array of integers in the same order, e.g. [1,2,3,1,2]\n\nEmails:\n${list}`,
+        },
+      ],
+      max_tokens: 120,
+      temperature: 0,
+    });
+
+    const text = res.choices[0]?.message?.content ?? "[]";
+    const match = text.match(/\[[\d,\s]+\]/);
+    if (!match) return emails.map(() => 2);
+
+    const scores = JSON.parse(match[0]) as number[];
+    return emails.map((_, i) => {
+      const s = scores[i];
+      return (s === 1 || s === 2 || s === 3 ? s : 2) as 1 | 2 | 3;
+    });
+  } catch {
+    return emails.map(() => 2 as const);
+  }
 }
 
 export default async function DashboardPage() {
@@ -57,11 +92,13 @@ export default async function DashboardPage() {
 
   if (tokenRow) {
     try {
-      emails = await fetchEmails(tokenRow.access_token, tokenRow.refresh_token);
+      const raw = await fetchEmails(tokenRow.access_token, tokenRow.refresh_token);
+      const priorities = await scorePriorities(raw);
+      emails = raw.map((e, i) => ({ ...e, priority: priorities[i] }));
       emailContext = emails
         .map(
           (e, i) =>
-            `[${i + 1}] ${e.from} | ${e.subject} | ${e.date}${e.snippet ? ` | ${e.snippet.slice(0, 50)}` : ""}`
+            `[${i + 1}] P${e.priority} ${e.from} | ${e.subject} | ${e.date}${e.snippet ? ` | ${e.snippet.slice(0, 50)}` : ""}`
         )
         .join("\n");
     } catch {

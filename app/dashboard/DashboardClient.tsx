@@ -26,6 +26,11 @@ function parseSender(from: string) {
   return match ? match[1].trim() : from;
 }
 
+function parseEmail(from: string) {
+  const match = from.match(/<([^>]+)>/);
+  return match ? match[1] : from;
+}
+
 function formatDate(dateStr: string) {
   try {
     const d = new Date(dateStr);
@@ -59,6 +64,13 @@ const SUGGESTED_PROMPTS = [
   "Who emailed me most recently?",
 ];
 
+interface SendModal {
+  to: string;
+  senderName: string;
+  subject: string;
+  body: string;
+}
+
 export default function DashboardClient({ emails, emailContext, displayName }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -67,6 +79,9 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
   const [isBodyLoading, setIsBodyLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  const [sendModal, setSendModal] = useState<SendModal | null>(null);
+  const [isSending, setIsSending] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -168,6 +183,47 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
     }
   }
 
+  function openSendModal(msg: Message) {
+    if (!selectedEmail) return;
+    setSendModal({
+      to: parseEmail(selectedEmail.from),
+      senderName: parseSender(selectedEmail.from),
+      subject: selectedEmail.subject.startsWith("Re:")
+        ? selectedEmail.subject
+        : `Re: ${selectedEmail.subject}`,
+      body: msg.content,
+    });
+  }
+
+  async function confirmSend() {
+    if (!sendModal) return;
+    setIsSending(true);
+    try {
+      const res = await fetch("/api/gmail/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: sendModal.to,
+          subject: sendModal.subject,
+          body: sendModal.body,
+        }),
+      });
+      if (!res.ok) {
+        const { error } = await res.json();
+        throw new Error(error || "Send failed");
+      }
+      setSendModal(null);
+      setToast(`Reply sent to ${sendModal.senderName} ✓`);
+      setTimeout(() => setToast(null), 3500);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      setToast(`Failed to send: ${msg}`);
+      setTimeout(() => setToast(null), 4000);
+    } finally {
+      setIsSending(false);
+    }
+  }
+
   return (
     <div className="flex h-full">
       {/* Left panel — email list */}
@@ -212,7 +268,6 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
         {/* Email preview pane */}
         {selectedEmail ? (
           <div className="flex-shrink-0 border-b border-zinc-200 bg-zinc-50 flex flex-col" style={{ maxHeight: "220px" }}>
-            {/* Preview header */}
             <div className="px-6 py-3 flex items-start justify-between gap-4 border-b border-zinc-100 bg-white flex-shrink-0">
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-zinc-900 truncate">{selectedEmail.subject || "(no subject)"}</p>
@@ -242,7 +297,6 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
                 </button>
               </div>
             </div>
-            {/* Preview body */}
             <div className="px-6 py-3 overflow-y-auto flex-1">
               {isBodyLoading ? (
                 <div className="flex items-center gap-2 text-xs text-zinc-400 py-1">
@@ -260,7 +314,6 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
             </div>
           </div>
         ) : (
-          /* Chat header when no email selected */
           <div className="px-6 py-3 border-b border-zinc-200 bg-white flex items-center justify-between flex-shrink-0">
             <div>
               <p className="text-sm font-semibold text-zinc-900">MailMind AI</p>
@@ -327,29 +380,43 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
                     msg.content
                   )}
                 </div>
-                {/* Copy button for draft replies */}
+                {/* Action buttons for draft replies */}
                 {msg.role === "assistant" && msg.isDraft && msg.content && !(isLoading && i === messages.length - 1) && (
-                  <button
-                    onClick={() => copyToClipboard(msg.content, i)}
-                    className="self-start flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-500 hover:border-violet-300 hover:text-violet-600 hover:bg-violet-50 transition-colors"
-                  >
-                    {copiedIdx === i ? (
-                      <>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => copyToClipboard(msg.content, i)}
+                      className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-500 hover:border-violet-300 hover:text-violet-600 hover:bg-violet-50 transition-colors"
+                    >
+                      {copiedIdx === i ? (
+                        <>
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                          Copied!
+                        </>
+                      ) : (
+                        <>
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                          </svg>
+                          Copy
+                        </>
+                      )}
+                    </button>
+                    {selectedEmail && (
+                      <button
+                        onClick={() => openSendModal(msg)}
+                        className="flex items-center gap-1.5 rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-medium text-violet-700 hover:bg-violet-100 hover:border-violet-300 transition-colors"
+                      >
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                          <polyline points="20 6 9 17 4 12" />
+                          <line x1="22" y1="2" x2="11" y2="13" />
+                          <polygon points="22 2 15 22 11 13 2 9 22 2" />
                         </svg>
-                        Copied!
-                      </>
-                    ) : (
-                      <>
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                        </svg>
-                        Copy Reply
-                      </>
+                        Send Reply
+                      </button>
                     )}
-                  </button>
+                  </div>
                 )}
               </div>
             </div>
@@ -398,6 +465,82 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
           </p>
         </div>
       </div>
+
+      {/* Send confirmation modal */}
+      {sendModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/30 backdrop-blur-sm"
+            onClick={() => !isSending && setSendModal(null)}
+          />
+          {/* Modal */}
+          <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-md p-6 flex flex-col gap-4">
+            <div>
+              <h2 className="text-base font-semibold text-zinc-900">Send this reply?</h2>
+              <p className="text-sm text-zinc-500 mt-0.5">
+                To: <span className="font-medium text-zinc-700">{sendModal.senderName}</span>
+                <span className="text-zinc-400 ml-1">({sendModal.to})</span>
+              </p>
+              <p className="text-xs text-zinc-400 mt-0.5">Subject: {sendModal.subject}</p>
+            </div>
+            {/* Draft preview */}
+            <div className="rounded-xl bg-zinc-50 border border-zinc-200 px-4 py-3 max-h-48 overflow-y-auto">
+              <p className="text-xs text-zinc-700 whitespace-pre-wrap leading-relaxed">{sendModal.body}</p>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setSendModal(null)}
+                disabled={isSending}
+                className="rounded-xl border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmSend}
+                disabled={isSending}
+                className="flex items-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
+              >
+                {isSending ? (
+                  <>
+                    <svg className="animate-spin w-3.5 h-3.5" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                    </svg>
+                    Sending...
+                  </>
+                ) : (
+                  <>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="22" y1="2" x2="11" y2="13" />
+                      <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                    </svg>
+                    Send
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Success / error toast */}
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50">
+          <div className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium shadow-lg ${
+            toast.startsWith("Failed")
+              ? "bg-red-600 text-white"
+              : "bg-zinc-900 text-white"
+          }`}>
+            {!toast.startsWith("Failed") && (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            )}
+            {toast}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -360,13 +360,16 @@ export default function DashboardClient({ emails, emailContext, displayName }: P
 
         {/* Daily digest card */}
         {highEmails.length > 0 && (
-          <div className="mx-3 mt-3 rounded-xl bg-red-50 border border-red-100 px-3 py-2.5 flex-shrink-0">
-            <p className="text-[11px] font-semibold text-red-700 mb-0.5">
-              🔴 {highEmails.length} high priority email{highEmails.length > 1 ? "s" : ""} today
-            </p>
+          <div className="mx-3 mt-3 rounded-xl border px-3 py-2.5 flex-shrink-0" style={{ background: "#f5f3ff", borderColor: "#ddd6fe" }}>
+            <div className="flex items-center gap-1.5 mb-0.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-violet-500 flex-shrink-0" />
+              <p className="text-[11px] font-semibold text-violet-700">
+                ✨ {highEmails.length} email{highEmails.length > 1 ? "s" : ""} need{highEmails.length === 1 ? "s" : ""} your attention today
+              </p>
+            </div>
             {mostUrgent && (
-              <p className="text-[11px] text-red-600 truncate">
-                Most urgent: <span className="font-medium">{mostUrgent.subject || "(no subject)"}</span>
+              <p className="text-[11px] text-zinc-500 truncate pl-3">
+                Most urgent: <span className="font-medium text-zinc-600">{mostUrgent.subject || "(no subject)"}</span>
                 {" "}from {parseSender(mostUrgent.from)}
               </p>
             )}

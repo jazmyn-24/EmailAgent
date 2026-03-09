@@ -16,6 +16,7 @@ interface Message {
 
 interface Props {
   emails: Email[];
+  emailContext: string;
   displayName: string;
 }
 
@@ -57,7 +58,7 @@ const SUGGESTED_PROMPTS = [
   "Who emailed me most recently?",
 ];
 
-export default function DashboardClient({ emails, displayName }: Props) {
+export default function DashboardClient({ emails, emailContext, displayName }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [selectedEmailId, setSelectedEmailId] = useState<string | null>(null);
@@ -87,7 +88,8 @@ export default function DashboardClient({ emails, displayName }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: newMessages,
-          emails,
+          emailContext,
+          emailCount: emails.length,
           selectedEmailId,
           selectedEmailBody,
         }),

@@ -53,10 +53,17 @@ export default async function DashboardPage() {
     .single();
 
   let emails: Email[] = [];
+  let emailContext = "";
 
   if (tokenRow) {
     try {
       emails = await fetchEmails(tokenRow.access_token, tokenRow.refresh_token);
+      emailContext = emails
+        .map(
+          (e, i) =>
+            `[${i + 1}] ${e.from} | ${e.subject} | ${e.date}${e.snippet ? ` | ${e.snippet.slice(0, 50)}` : ""}`
+        )
+        .join("\n");
     } catch {
       // token expired or invalid — fall through to show connect button
     }
@@ -113,7 +120,7 @@ export default async function DashboardPage() {
       ) : (
         /* Chat interface */
         <div className="flex-1 overflow-hidden">
-          <DashboardClient emails={emails} displayName={displayName} />
+          <DashboardClient emails={emails} emailContext={emailContext} displayName={displayName} />
         </div>
       )}
     </div>

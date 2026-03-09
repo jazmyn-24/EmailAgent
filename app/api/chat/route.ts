@@ -6,24 +6,24 @@ import { google } from "googleapis";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-interface Email {
+interface Message {
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface SearchResult {
   id: string;
   from: string;
   subject: string;
   date: string;
-  snippet?: string;
-}
-
-interface Message {
-  role: "user" | "assistant";
-  content: string;
+  snippet: string;
 }
 
 async function searchGmail(
   accessToken: string,
   refreshToken: string | null,
   query: string
-): Promise<Email[]> {
+): Promise<SearchResult[]> {
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET
@@ -60,32 +60,25 @@ export async function POST(request: NextRequest) {
   const { userId } = await auth();
   if (!userId) return new Response("Unauthorized", { status: 401 });
 
-  const { messages, emails, selectedEmailId, selectedEmailBody } = await request.json();
+  const { messages, emailContext, emailCount, selectedEmailId, selectedEmailBody } = await request.json();
 
-  const { data: tokenRow } = await supabaseAdmin
-    .from("gmail_tokens")
-    .select("*")
-    .eq("clerk_user_id", userId)
-    .single();
+  const [{ data: tokenRow }] = await Promise.all([
+    supabaseAdmin
+      .from("gmail_tokens")
+      .select("access_token, refresh_token")
+      .eq("clerk_user_id", userId)
+      .single(),
+  ]);
 
-  const selectedEmail = selectedEmailId
-    ? (emails as Email[]).find((e) => e.id === selectedEmailId)
-    : null;
-
-  // Compact context: 50-char snippets only
-  const emailsContext = (emails as Email[])
-    .slice(0, 20)
-    .map(
-      (e, i) =>
-        `[${i + 1}] ${e.from} | ${e.subject} | ${e.date}${e.snippet ? ` | ${e.snippet.slice(0, 50)}` : ""}`
-    )
-    .join("\n");
+  const focusedBlock = selectedEmailId && selectedEmailBody
+    ? `\nFOCUSED EMAIL BODY:\n${selectedEmailBody}\n`
+    : "";
 
   const systemPrompt = `You are MailMind, an AI email assistant.
 
-INBOX (${Math.min((emails as Email[]).length, 20)} emails):
-${emailsContext}
-${selectedEmail ? `\nFOCUSED: From: ${selectedEmail.from} | Subject: ${selectedEmail.subject}${selectedEmailBody ? `\nBODY: ${selectedEmailBody}` : ""}\n` : ""}
+INBOX (${emailCount ?? 0} emails):
+${emailContext ?? ""}
+${focusedBlock}
 Use search_gmail when user asks about specific people, topics, or dates not in the snapshot.
 Gmail syntax: from:x, subject:x, after:YYYY/MM/DD, is:unread, has:attachment
 

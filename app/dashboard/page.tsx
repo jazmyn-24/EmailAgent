@@ -1,135 +1,73 @@
 import { currentUser } from "@clerk/nextjs/server";
-import { UserButton } from "@clerk/nextjs";
 import Link from "next/link";
 import { supabaseAdmin } from "@/lib/supabase";
-import { google } from "googleapis";
+import { fetchEmails, fetchSentCount } from "@/lib/gmail";
+import { scorePriorities } from "@/lib/scoring";
 import OpenAI from "openai";
-import DashboardClient from "./DashboardClient";
+import type { ScoredEmail } from "@/lib/types";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-export interface ScoredEmail {
-  id: string;
-  from: string;
-  subject: string;
-  date: string;
-  snippet: string;
-  priority: 1 | 2 | 3;
-  reason: string;
-}
-
-async function fetchEmails(
-  accessToken: string,
-  refreshToken: string | null
-): Promise<Omit<ScoredEmail, "priority" | "reason">[]> {
-  const oauth2Client = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET
-  );
-  oauth2Client.setCredentials({ access_token: accessToken, refresh_token: refreshToken });
-
-  const gmail = google.gmail({ version: "v1", auth: oauth2Client });
-  const listRes = await gmail.users.messages.list({ userId: "me", maxResults: 20 });
-  const messages = listRes.data.messages ?? [];
-
-  return Promise.all(
-    messages.map(async (msg) => {
-      const detail = await gmail.users.messages.get({
-        userId: "me",
-        id: msg.id!,
-        format: "metadata",
-        metadataHeaders: ["From", "Subject", "Date", "CC", "List-Unsubscribe"],
-      });
-      const headers = detail.data.payload?.headers ?? [];
-      const get = (name: string) => headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? "";
-      return {
-        id: msg.id!,
-        from: get("From"),
-        subject: get("Subject"),
-        date: get("Date"),
-        snippet: detail.data.snippet ?? "",
-        cc: get("CC"),
-        listUnsubscribe: get("List-Unsubscribe"),
-      };
-    })
-  );
-}
-
-async function scorePriorities(
-  emails: Omit<ScoredEmail, "priority" | "reason">[],
-  promoDomainsLearned: string[]
-): Promise<{ score: 1 | 2 | 3; reason: string }[]> {
-  if (emails.length === 0) return [];
-
-  const promoHint = promoDomainsLearned.length
-    ? `\nUser-marked promo domains (always score 3): ${promoDomainsLearned.join(", ")}`
-    : "";
-
+async function generateDigest(emails: ScoredEmail[]): Promise<string> {
+  if (emails.length === 0) return "No emails to summarize.";
+  const highPriority = emails.filter((e) => e.priority === 1);
   const list = emails
-    .map((e, i) => `${i + 1}. From: ${e.from} | Subject: ${e.subject} | Snippet: ${(e.snippet ?? "").slice(0, 100)}`)
+    .slice(0, 15)
+    .map((e, i) => `[${i + 1}] [P${e.priority}] ${e.from} | ${e.subject} | ${e.snippet.slice(0, 80)}`)
     .join("\n");
-
-  const prompt = `You are an email priority classifier. Score each email 1–3 using THESE EXACT RULES:
-
-SCORE 3 (LOW) — if ANY of these apply:
-- Sender is a known brand, retailer, or business (Temu, SHEIN, BestBuy, Zara, Papa Johns, Amazon, Netflix, Spotify, LinkedIn, Twitter/X, GitHub notifications, Notion, Slack digests, any store/shop/mall)
-- Sender address contains: noreply, no-reply, notifications@, alerts@, newsletter@, marketing@, info@, support@, hello@, team@, news@
-- Subject has: sale, deal, offer, % off, discount, promo, coupon, free shipping, limited time, unsubscribe, newsletter, digest, update, receipt, order confirmation, welcome to, verify your email
-- Sender domain looks like: mail.*, em.*, email.*, mg.*, send.*, replies.*, bounce.*
-- Automated/transactional: receipts, shipping updates, password resets, verification codes${promoHint}
-
-SCORE 1 (HIGH) — ALL of these must be true:
-- Sender appears to be a real individual person (has a name, personal email domain like gmail/yahoo/outlook/icloud, or work email that isn't a brand)
-- Subject or snippet contains a direct question, request, deadline, or genuine urgency (urgent, ASAP, deadline, by [date], can you, please, need you to, following up)
-- NOT a CC email, NOT automated
-
-SCORE 2 (MEDIUM) — everything else:
-- Notifications worth reading but no action needed
-- CC emails
-- Business emails that aren't urgent
-
-Return ONLY a JSON array, one object per email, in order:
-[{"score":1,"reason":"Brief 1-sentence explanation"},...]
-
-Emails:
-${list}`;
 
   try {
     const res = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      max_tokens: 800,
-      temperature: 0,
-      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "user",
+          content: `You are an AI email assistant. Write a 2-3 sentence daily digest for the user's inbox. Be direct and helpful. Mention any high-priority items first (there are ${highPriority.length} high-priority emails). Keep it concise and conversational.\n\nEmails:\n${list}`,
+        },
+      ],
+      max_tokens: 150,
+      temperature: 0.4,
     });
-
-    const text = res.choices[0]?.message?.content ?? "{}";
-    // model returns {"results":[...]} or just [...]
-    let parsed: { score: number; reason: string }[];
-    try {
-      const obj = JSON.parse(text);
-      parsed = Array.isArray(obj) ? obj : (obj.results ?? obj.emails ?? Object.values(obj)[0]);
-    } catch {
-      return emails.map(() => ({ score: 2 as const, reason: "Could not score" }));
-    }
-
-    return emails.map((_, i) => {
-      const item = parsed[i];
-      const s = item?.score;
-      return {
-        score: (s === 1 || s === 2 || s === 3 ? s : 2) as 1 | 2 | 3,
-        reason: item?.reason ?? "No reason provided",
-      };
-    });
+    return res.choices[0]?.message?.content?.trim() ?? "Your inbox is ready to review.";
   } catch {
-    return emails.map(() => ({ score: 2 as const, reason: "Scoring unavailable" }));
+    return "Your inbox is ready to review.";
   }
+}
+
+async function generateNewsletterDigest(newsletters: ScoredEmail[]): Promise<string> {
+  if (newsletters.length === 0) return "";
+  const list = newsletters
+    .slice(0, 8)
+    .map((e) => `- ${e.from.split("<")[0].trim()}: ${e.subject}`)
+    .join("\n");
+
+  try {
+    const res = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "user",
+          content: `Summarize these newsletters/promotions in 2-3 bullet points. Be brief and highlight anything potentially interesting. No preamble.\n\n${list}`,
+        },
+      ],
+      max_tokens: 120,
+      temperature: 0.3,
+    });
+    return res.choices[0]?.message?.content?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function getGreeting(firstName: string): string {
+  const hour = new Date().getHours();
+  const time = hour < 12 ? "morning" : hour < 17 ? "afternoon" : "evening";
+  return `Good ${time}, ${firstName}`;
 }
 
 export default async function DashboardPage() {
   const user = await currentUser();
-  const displayName =
-    user?.firstName ?? user?.username ?? user?.emailAddresses[0]?.emailAddress ?? "there";
+  const firstName = user?.firstName ?? user?.username ?? "there";
 
   const { data: tokenRow } = await supabaseAdmin
     .from("gmail_tokens")
@@ -137,92 +75,250 @@ export default async function DashboardPage() {
     .eq("clerk_user_id", user?.id ?? "")
     .single();
 
-  let emails: ScoredEmail[] = [];
-  let emailContext = "";
-
-  if (tokenRow) {
-    try {
-      // Fetch learned promo domains from feedback
-      const { data: feedbackRows } = await supabaseAdmin
-        .from("priority_feedback")
-        .select("sender_domain")
-        .eq("clerk_user_id", user?.id ?? "")
-        .eq("correct_priority", 3)
-        .not("sender_domain", "is", null);
-
-      const promoDomainsLearned = [
-        ...new Set((feedbackRows ?? []).map((r: { sender_domain: string }) => r.sender_domain).filter(Boolean)),
-      ] as string[];
-
-      const raw = await fetchEmails(tokenRow.access_token, tokenRow.refresh_token);
-      const scores = await scorePriorities(raw, promoDomainsLearned);
-
-      emails = raw.map((e, i) => ({
-        ...e,
-        priority: scores[i].score,
-        reason: scores[i].reason,
-      }));
-
-      const priorityLabel = (p: number) => p === 1 ? "HIGH" : p === 2 ? "MED" : "LOW";
-      emailContext = emails
-        .map(
-          (e, i) =>
-            `[${i + 1}] [${priorityLabel(e.priority)}] ${e.from} | ${e.subject} | ${e.date}${e.snippet ? ` | ${e.snippet.slice(0, 50)}` : ""}`
-        )
-        .join("\n");
-    } catch {
-      // token expired or invalid — fall through to show connect button
-    }
+  if (!tokenRow) {
+    return (
+      <div className="flex-1 flex items-center justify-center bg-zinc-50 h-full">
+        <div className="rounded-2xl border border-zinc-200 bg-white p-12 text-center max-w-sm shadow-sm">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-violet-100">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
+              <polyline points="22,6 12,13 2,6" />
+            </svg>
+          </div>
+          <h2 className="text-xl font-bold text-zinc-900 mb-2">Connect your Gmail</h2>
+          <p className="text-sm text-zinc-500 mb-6">Connect Gmail to see your dashboard.</p>
+          <a
+            href="/api/auth/gmail"
+            className="inline-flex items-center justify-center rounded-xl bg-violet-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-violet-700 transition-colors"
+          >
+            Connect Gmail
+          </a>
+        </div>
+      </div>
+    );
   }
 
-  return (
-    <div className="h-screen flex flex-col bg-white font-sans antialiased text-zinc-900 overflow-hidden">
-      <header className="flex-shrink-0 border-b border-zinc-200 bg-white">
-        <div className="flex items-center justify-between px-6 py-3">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-violet-600" />
-            <Link href="/" className="text-base font-bold tracking-tight text-zinc-900">
-              MailMind
-            </Link>
-          </div>
-          <div className="flex items-center gap-3">
-            {tokenRow && (
-              <a
-                href="/api/auth/gmail/disconnect"
-                className="text-xs font-medium text-zinc-400 hover:text-red-500 transition-colors border border-zinc-200 hover:border-red-200 rounded-lg px-3 py-1.5"
-              >
-                Disconnect Gmail
-              </a>
-            )}
-            <UserButton appearance={{ elements: { avatarBox: "w-8 h-8" } }} />
-          </div>
-        </div>
-      </header>
+  let emails: ScoredEmail[] = [];
+  let digest = "";
+  let newsletterDigest = "";
+  let sentCount = 0;
 
-      {!tokenRow || emails.length === 0 ? (
-        <div className="flex-1 flex items-center justify-center bg-zinc-50">
-          <div className="rounded-2xl border border-zinc-200 bg-white p-12 text-center max-w-sm shadow-sm">
-            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-violet-100">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
-                <polyline points="22,6 12,13 2,6" />
-              </svg>
-            </div>
-            <h2 className="text-xl font-bold text-zinc-900 mb-2">Connect your Gmail</h2>
-            <p className="text-sm text-zinc-500 mb-6">Connect Gmail to chat with your inbox using AI.</p>
-            <a
-              href="/api/auth/gmail"
-              className="inline-flex items-center justify-center rounded-xl bg-violet-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-violet-700 transition-colors"
+  try {
+    const { data: feedbackRows } = await supabaseAdmin
+      .from("priority_feedback")
+      .select("sender_domain")
+      .eq("clerk_user_id", user?.id ?? "")
+      .eq("correct_priority", 3)
+      .not("sender_domain", "is", null);
+
+    const promoDomainsLearned = [
+      ...new Set(
+        (feedbackRows ?? [])
+          .map((r: { sender_domain: string }) => r.sender_domain)
+          .filter(Boolean)
+      ),
+    ] as string[];
+
+    const [raw, fetchedSentCount] = await Promise.all([
+      fetchEmails(tokenRow.access_token, tokenRow.refresh_token),
+      fetchSentCount(tokenRow.access_token, tokenRow.refresh_token),
+    ]);
+
+    sentCount = fetchedSentCount;
+    const scores = await scorePriorities(raw, promoDomainsLearned);
+
+    emails = raw.map((e, i) => ({
+      ...e,
+      priority: scores[i].score,
+      reason: scores[i].reason,
+    }));
+
+    const newsletters = emails.filter((e) => e.priority === 3);
+    [digest, newsletterDigest] = await Promise.all([
+      generateDigest(emails),
+      generateNewsletterDigest(newsletters),
+    ]);
+  } catch {
+    // fall through with empty state
+  }
+
+  const highPriority = emails.filter((e) => e.priority === 1);
+  const newsletters = emails.filter((e) => e.priority === 3);
+  const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+
+  const statCards = [
+    {
+      label: "Emails Today",
+      value: emails.length,
+      sub: "in your inbox",
+      color: "bg-violet-50 border-violet-100",
+      textColor: "text-violet-700",
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
+          <polyline points="22,6 12,13 2,6" />
+        </svg>
+      ),
+    },
+    {
+      label: "Need Attention",
+      value: highPriority.length,
+      sub: "high priority",
+      color: "bg-red-50 border-red-100",
+      textColor: "text-red-600",
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="10" />
+          <line x1="12" y1="8" x2="12" y2="12" />
+          <line x1="12" y1="16" x2="12.01" y2="16" />
+        </svg>
+      ),
+    },
+    {
+      label: "Replied Today",
+      value: sentCount,
+      sub: "emails sent",
+      color: "bg-emerald-50 border-emerald-100",
+      textColor: "text-emerald-700",
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#059669" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="9 17 4 12 9 7" />
+          <path d="M20 18v-2a4 4 0 0 0-4-4H4" />
+        </svg>
+      ),
+    },
+    {
+      label: "Newsletters",
+      value: newsletters.length,
+      sub: "low priority",
+      color: "bg-amber-50 border-amber-100",
+      textColor: "text-amber-700",
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 0-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2" />
+          <path d="M18 14h-8" />
+          <path d="M15 18h-5" />
+          <path d="M10 6h8v4h-8V6Z" />
+        </svg>
+      ),
+    },
+  ];
+
+  return (
+    <div className="h-full overflow-y-auto bg-zinc-50">
+      <div className="max-w-5xl mx-auto px-6 py-8">
+        {/* Header */}
+        <div className="mb-8">
+          <p className="text-xs text-zinc-400 mb-1">{today}</p>
+          <h1 className="text-2xl font-bold text-zinc-900">{getGreeting(firstName)} 👋</h1>
+          <p className="text-sm text-zinc-500 mt-1">Here's what's happening in your inbox.</p>
+        </div>
+
+        {/* Stat cards */}
+        <div className="grid grid-cols-4 gap-4 mb-6">
+          {statCards.map((card) => (
+            <div
+              key={card.label}
+              className={`rounded-2xl border p-4 ${card.color}`}
             >
-              Connect Gmail
-            </a>
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs font-medium text-zinc-500">{card.label}</span>
+                {card.icon}
+              </div>
+              <div className={`text-3xl font-bold ${card.textColor}`}>{card.value}</div>
+              <div className="text-xs text-zinc-400 mt-1">{card.sub}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* AI Digest card */}
+        {digest && (
+          <div className="rounded-2xl border border-violet-200 bg-violet-50 p-5 mb-6">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="w-2 h-2 rounded-full bg-violet-500" />
+              <span className="text-xs font-semibold text-violet-700 uppercase tracking-wide">AI Daily Digest</span>
+            </div>
+            <p className="text-sm text-zinc-700 leading-relaxed">{digest}</p>
+            <div className="mt-3">
+              <Link
+                href="/dashboard/inbox"
+                className="text-xs font-medium text-violet-600 hover:text-violet-800 transition-colors"
+              >
+                Open Inbox →
+              </Link>
+            </div>
+          </div>
+        )}
+
+        {/* Two columns */}
+        <div className="grid grid-cols-2 gap-5">
+          {/* Priority Emails */}
+          <div className="rounded-2xl border border-zinc-200 bg-white p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold text-zinc-900">Priority Emails</h2>
+              <Link
+                href="/dashboard/inbox"
+                className="text-xs text-violet-600 hover:text-violet-800 font-medium"
+              >
+                View all →
+              </Link>
+            </div>
+            {highPriority.length === 0 ? (
+              <p className="text-sm text-zinc-400 text-center py-6">No high-priority emails</p>
+            ) : (
+              <div className="space-y-3">
+                {highPriority.slice(0, 5).map((email) => (
+                  <Link
+                    key={email.id}
+                    href="/dashboard/inbox"
+                    className="block group"
+                  >
+                    <div className="flex items-start gap-3 p-3 rounded-xl hover:bg-zinc-50 transition-colors">
+                      <span className="mt-1.5 w-2 h-2 rounded-full bg-red-500 flex-shrink-0" />
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-zinc-900 truncate group-hover:text-violet-700 transition-colors">
+                          {email.from.split("<")[0].trim() || email.from}
+                        </p>
+                        <p className="text-xs text-zinc-600 truncate">{email.subject}</p>
+                        <p className="text-xs text-zinc-400 truncate mt-0.5">{email.snippet.slice(0, 60)}</p>
+                      </div>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Newsletter Digest */}
+          <div className="rounded-2xl border border-zinc-200 bg-white p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold text-zinc-900">Newsletter Digest</h2>
+              <span className="text-xs text-zinc-400">{newsletters.length} newsletters</span>
+            </div>
+            {newsletterDigest ? (
+              <div className="text-sm text-zinc-600 leading-relaxed whitespace-pre-line">
+                {newsletterDigest}
+              </div>
+            ) : newsletters.length === 0 ? (
+              <p className="text-sm text-zinc-400 text-center py-6">No newsletters today</p>
+            ) : (
+              <div className="space-y-2">
+                {newsletters.slice(0, 5).map((email) => (
+                  <div key={email.id} className="flex items-center gap-2 py-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-zinc-700 truncate">
+                        {email.from.split("<")[0].trim()}
+                      </p>
+                      <p className="text-xs text-zinc-400 truncate">{email.subject}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
-      ) : (
-        <div className="flex-1 overflow-hidden">
-          <DashboardClient emails={emails} emailContext={emailContext} displayName={displayName} />
-        </div>
-      )}
+      </div>
     </div>
   );
 }

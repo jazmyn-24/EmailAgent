@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import type { ScoredEmail } from "./page";
+import type { ScoredEmail } from "@/lib/types";
 
 type Email = ScoredEmail;
 type Filter = "all" | "high" | "medium" | "low";
